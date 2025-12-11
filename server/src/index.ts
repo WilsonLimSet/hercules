@@ -6,6 +6,7 @@ import cors from 'cors';
 import { createClient } from 'redis';
 import { dubbingRouter } from './routes/dubbing';
 import { ttsRouter } from './routes/tts-translate';
+import conversationRouter from './routes/conversation';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -25,6 +26,7 @@ app.use(express.json());
 // Routes
 app.use('/api/dubbing', dubbingRouter);
 app.use('/api/tts', ttsRouter);
+app.use('/api/conversation', conversationRouter);
 
 // Health check
 app.get('/health', (req, res) => {

@@ -1,8 +1,15 @@
 import { useState, useRef } from 'react';
 import { cn } from '@extension/ui';
 
+interface VideoContext {
+  transcript?: string;
+  title?: string;
+}
+
 interface ConversationPanelProps {
   isLight: boolean;
+  serverUrl: string;
+  videoContext?: VideoContext;
 }
 
 interface ConversationResult {
@@ -12,9 +19,7 @@ interface ConversationResult {
   audioBase64: string;
 }
 
-const API_URL = 'http://localhost:3001';
-
-export const ConversationPanel = ({ isLight }: ConversationPanelProps) => {
+export const ConversationPanel = ({ isLight, serverUrl, videoContext }: ConversationPanelProps) => {
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [lastQuestion, setLastQuestion] = useState<string>('');
@@ -58,21 +63,22 @@ export const ConversationPanel = ({ isLight }: ConversationPanelProps) => {
 
       mediaRecorder.start();
       setIsRecording(true);
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Error starting recording:', err);
-      
+
       let errorMessage = 'Failed to access microphone. ';
-      
-      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-        errorMessage += 'Please allow microphone access:\n1. Click the 🔒 lock icon in the address bar\n2. Allow microphone permissions\n3. Refresh this page';
-      } else if (err.name === 'NotFoundError') {
+      const error = err as { name?: string; message?: string };
+
+      if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
+        errorMessage += 'Please allow microphone access:\n1. Click the lock icon in the address bar\n2. Allow microphone permissions\n3. Refresh this page';
+      } else if (error.name === 'NotFoundError') {
         errorMessage += 'No microphone found. Please connect a microphone and try again.';
-      } else if (err.message) {
-        errorMessage += err.message;
+      } else if (error.message) {
+        errorMessage += error.message;
       } else {
         errorMessage += 'Please check your browser permissions and try again.';
       }
-      
+
       setError(errorMessage);
     }
   };
@@ -90,27 +96,34 @@ export const ConversationPanel = ({ isLight }: ConversationPanelProps) => {
       const formData = new FormData();
       formData.append('audio', audioBlob, 'recording.webm');
 
-      const response = await fetch(`${API_URL}/api/conversation/ask`, {
+      // Include video context if available
+      if (videoContext?.transcript) {
+        formData.append('videoContext', JSON.stringify(videoContext));
+      }
+
+      const response = await fetch(`${serverUrl}/api/conversation/ask`, {
         method: 'POST',
         body: formData,
       });
 
       if (!response.ok) {
-        throw new Error('Failed to process audio');
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || 'Failed to process audio');
       }
 
       const result: ConversationResult = await response.json();
-      
+
       setLastQuestion(result.questionText);
       setLastResponse(result.responseText);
       setDetectedLanguage(result.detectedLanguage);
 
       // Play the response audio
       playResponseAudio(result.audioBase64);
-      
+
     } catch (err) {
       console.error('Error sending audio:', err);
-      setError('Failed to process your question. Please try again.');
+      const errorMsg = err instanceof Error ? err.message : 'Failed to process your question';
+      setError(errorMsg + '. Please try again.');
     } finally {
       setIsProcessing(false);
     }
@@ -155,7 +168,9 @@ export const ConversationPanel = ({ isLight }: ConversationPanelProps) => {
         'text-sm mb-4',
         isLight ? 'text-gray-600' : 'text-gray-300'
       )}>
-        Ask a question in any language and get an AI response in the same language.
+        {videoContext?.transcript
+          ? 'Ask questions about the video content. Speak in any language!'
+          : 'Ask any question in any language and get an AI response.'}
       </p>
 
       {/* Recording Button */}
@@ -254,7 +269,8 @@ export const ConversationPanel = ({ isLight }: ConversationPanelProps) => {
         </div>
       )}
 
-      {/* Hidden audio player */}
+      {/* Hidden audio player - captions provided via text display above */}
+      {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
       <audio ref={audioPlayerRef} className="hidden" />
     </div>
   );

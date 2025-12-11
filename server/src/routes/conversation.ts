@@ -40,10 +40,11 @@ if (!fs.existsSync(tempDir)) {
 /**
  * POST /api/conversation/ask
  * Upload audio question and get AI response
+ * Optional: include videoContext (transcript) as form field
  */
 conversationRouter.post('/ask', upload.single('audio'), async (req: Request, res: Response) => {
   let tempFilePath: string | undefined;
-  
+
   try {
     if (!req.file) {
       res.status(400).json({ error: 'No audio file provided' });
@@ -53,8 +54,19 @@ conversationRouter.post('/ask', upload.single('audio'), async (req: Request, res
     tempFilePath = req.file.path;
     console.log(`[CONVERSATION] Received audio file: ${tempFilePath}`);
 
-    // Process the conversation
-    const result = await processConversation(tempFilePath);
+    // Parse video context from form field (if provided)
+    let videoContext: { transcript?: string; title?: string } | undefined;
+    if (req.body.videoContext) {
+      try {
+        videoContext = JSON.parse(req.body.videoContext);
+        console.log(`[CONVERSATION] Video context provided: ${videoContext?.transcript?.length || 0} chars`);
+      } catch {
+        console.log('[CONVERSATION] Failed to parse videoContext, continuing without it');
+      }
+    }
+
+    // Process the conversation with video context
+    const result = await processConversation(tempFilePath, videoContext);
 
     // Send response as JSON with audio as base64
     res.json({

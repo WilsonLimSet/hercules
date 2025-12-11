@@ -3,6 +3,7 @@ import { useStorage, withErrorBoundary, withSuspense } from '@extension/shared';
 import { exampleThemeStorage, herculesStorage } from '@extension/storage';
 import { cn, ErrorDisplay, LoadingSpinner } from '@extension/ui';
 import { useState, useEffect } from 'react';
+import { ConversationPanel } from './ConversationPanel';
 
 const SUPPORTED_LANGUAGES: Record<string, string> = {
   en: 'English',
@@ -37,10 +38,12 @@ const SidePanel = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [isActive, setIsActive] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [debugLog, setDebugLog] = useState<string[]>([]);
   const [audioReadyCount, setAudioReadyCount] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentSubtitle, setCurrentSubtitle] = useState<string>('');
+  const [videoTranscript, setVideoTranscript] = useState<string>('');
 
   const addLog = (msg: string) => {
     console.log('[Hercules]', msg);
@@ -293,6 +296,7 @@ const SidePanel = () => {
     setStatus('');
     setAudioReadyCount(0);
     setIsPlaying(false);
+    setVideoTranscript('');
   };
 
   const handleVolumeChange = (volume: number) => {
@@ -328,6 +332,10 @@ const SidePanel = () => {
         if (response.ok) {
           const data = await response.json();
           setAudioReadyCount(data.audioReadySegments || 0);
+          // Store transcript for Q&A feature
+          if (data.transcript && !videoTranscript) {
+            setVideoTranscript(data.transcript);
+          }
           if (data.audioReadySegments > 0 && !isPlaying) {
             setStatus(`Audio ready for ${data.audioReadySegments} segments. Click "Play Dubbed Video" to start!`);
             setStatusType('success');
@@ -341,7 +349,7 @@ const SidePanel = () => {
     pollStatus();
     const interval = setInterval(pollStatus, 2000);
     return () => clearInterval(interval);
-  }, [isActive, sessionId, herculesState.serverUrl, isPlaying]);
+  }, [isActive, sessionId, herculesState.serverUrl, isPlaying, videoTranscript]);
 
   return (
     <div className={cn('hercules-panel', isLight ? 'bg-slate-50' : 'bg-gray-900')}>
@@ -448,6 +456,16 @@ const SidePanel = () => {
               </div>
             )}
 
+            {/* Q&A Panel - shown when translation is active */}
+            {isActive && videoTranscript && (
+              <div style={{ marginTop: '1rem' }}>
+                <ConversationPanel
+                  isLight={isLight}
+                  serverUrl={herculesState.serverUrl}
+                  videoContext={{ transcript: videoTranscript }}
+                />
+              </div>
+            )}
           </>
         )}
       </main>
