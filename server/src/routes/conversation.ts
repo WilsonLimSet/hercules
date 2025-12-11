@@ -2,7 +2,8 @@ import { Router, Request, Response } from 'express';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
-import { processConversation } from '../services/conversational-ai';
+import { processConversation, generateResponse } from '../services/conversational-ai';
+import { generateSpeech } from '../services/tts';
 
 const conversationRouter = Router();
 
@@ -93,13 +94,59 @@ conversationRouter.post('/ask', upload.single('audio'), async (req: Request, res
 });
 
 /**
+ * POST /api/conversation/ask-text
+ * Text-based question (no audio upload needed)
+ */
+conversationRouter.post('/ask-text', async (req: Request, res: Response) => {
+  try {
+    const { question, videoContext } = req.body;
+
+    if (!question || typeof question !== 'string') {
+      res.status(400).json({ error: 'Question is required' });
+      return;
+    }
+
+    console.log(`[CONVERSATION] Text question: "${question}"`);
+    if (videoContext?.transcript) {
+      console.log(`[CONVERSATION] Video context: ${videoContext.transcript.length} chars`);
+    }
+
+    // Generate response using GPT
+    const responseText = await generateResponse(question, 'en', videoContext);
+
+    // Generate TTS audio for the response
+    let audioBase64: string | undefined;
+    try {
+      const audioBuffer = await generateSpeech(responseText, {
+        modelId: 'eleven_multilingual_v2',
+      });
+      audioBase64 = audioBuffer.toString('base64');
+    } catch (ttsError) {
+      console.error('[CONVERSATION] TTS failed, returning text only:', ttsError);
+    }
+
+    res.json({
+      success: true,
+      responseText,
+      audioBase64,
+    });
+  } catch (error) {
+    console.error('[CONVERSATION] Text error:', error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Failed to process question',
+    });
+  }
+});
+
+/**
  * GET /api/conversation/status
  * Check if conversation API is ready
  */
 conversationRouter.get('/status', (req: Request, res: Response) => {
   const hasOpenAIKey = !!process.env.OPENAI_API_KEY;
   const hasElevenLabsKey = !!process.env.ELEVENLABS_API_KEY;
-  
+
   res.json({
     ready: hasOpenAIKey && hasElevenLabsKey,
     openai: hasOpenAIKey,

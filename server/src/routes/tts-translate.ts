@@ -94,8 +94,8 @@ ttsRouter.post('/session', async (req: Request, res: Response) => {
 
     const sessionId = `tts_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
-    // Merge small segments into larger sentence-based chunks (~6 seconds each)
-    const segments = mergeIntoSentences(rawTranscript, 6);
+    // Merge small segments into larger sentence-based chunks (~12 seconds each)
+    const segments = mergeIntoSentences(rawTranscript, 12);
     console.log(`[TTS-SESSION] Merged into ${segments.length} sentence segments`);
 
     const session: TTSSession = {
