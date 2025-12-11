@@ -108,8 +108,17 @@ ttsRouter.post('/session', async (req: Request, res: Response) => {
 
     sessions.set(sessionId, session);
 
-    // Start translating all segments in background
-    translateAllSegments(session).catch(console.error);
+    // Start translating all segments in background, then pre-generate first few audio
+    translateAllSegments(session).then(() => {
+      // Pre-generate audio for first 3 segments
+      for (let i = 0; i < Math.min(3, session.segments.length); i++) {
+        const seg = session.segments[i];
+        if (seg.translatedText && !seg.audioReady && !session.generatingAudio.has(i)) {
+          session.generatingAudio.add(i);
+          generateSegmentAudio(session, seg).catch(console.error);
+        }
+      }
+    }).catch(console.error);
 
     res.json({
       sessionId,
