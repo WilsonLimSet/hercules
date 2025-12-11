@@ -5,10 +5,8 @@ const client = new ElevenLabsClient({
   apiKey: process.env.ELEVENLABS_API_KEY,
 });
 
-// Chunk duration in seconds
-const CHUNK_DURATION = 30;
+const CHUNK_DURATION = 30; // seconds
 
-// Supported languages for dubbing
 export const SUPPORTED_LANGUAGES = {
   en: 'English',
   es: 'Spanish',
@@ -34,8 +32,8 @@ export const SUPPORTED_LANGUAGES = {
 
 export type LanguageCode = keyof typeof SUPPORTED_LANGUAGES;
 
-interface ChunkInfo {
-  index: number;
+interface ChunkResult {
+  chunkIndex: number;
   startTime: number;
   endTime: number;
   status: 'pending' | 'processing' | 'completed' | 'failed';
@@ -44,193 +42,117 @@ interface ChunkInfo {
   error?: string;
 }
 
-interface DubbingJob {
+interface SessionState {
   id: string;
   youtubeUrl: string;
-  sourceLang: string;
   targetLang: string;
-  status: 'pending' | 'processing' | 'completed' | 'failed';
-  chunks: ChunkInfo[];
-  currentChunk: number;
-  totalChunks: number;
-  videoDuration?: number;
-  error?: string;
-  createdAt: number;
-  updatedAt: number;
+  chunks: Map<number, ChunkResult>;
+  processingChunks: Set<number>;
 }
 
-// Create a dubbing job for a YouTube video with chunking
-export const createDubbingJob = async (
-  youtubeUrl: string,
-  sourceLang: string,
-  targetLang: string,
-  videoDuration?: number
-): Promise<DubbingJob> => {
-  const jobId = `job_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+// In-memory session store (use Redis in production for persistence)
+const sessions = new Map<string, SessionState>();
 
-  // Calculate chunks based on video duration
-  // If duration unknown, start with first chunk and expand as needed
-  const duration = videoDuration || CHUNK_DURATION; // Default to one chunk if unknown
-  const totalChunks = Math.ceil(duration / CHUNK_DURATION);
+// Create a new translation session
+export const createSession = (youtubeUrl: string, targetLang: string): string => {
+  const sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
-  const chunks: ChunkInfo[] = [];
-  for (let i = 0; i < totalChunks; i++) {
-    chunks.push({
-      index: i,
-      startTime: i * CHUNK_DURATION,
-      endTime: Math.min((i + 1) * CHUNK_DURATION, duration),
-      status: 'pending',
-    });
-  }
-
-  const job: DubbingJob = {
-    id: jobId,
+  const session: SessionState = {
+    id: sessionId,
     youtubeUrl,
-    sourceLang,
     targetLang,
-    status: 'pending',
-    chunks,
-    currentChunk: 0,
-    totalChunks,
-    videoDuration: duration,
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
+    chunks: new Map(),
+    processingChunks: new Set(),
   };
 
-  // Store job in Redis
-  await redisClient.set(`job:${jobId}`, JSON.stringify(job));
-
-  // Start processing first chunk immediately
-  processNextChunk(job).catch(console.error);
-
-  return job;
+  sessions.set(sessionId, session);
+  return sessionId;
 };
 
-// Process the next pending chunk
-const processNextChunk = async (job: DubbingJob): Promise<void> => {
-  const pendingChunk = job.chunks.find(c => c.status === 'pending');
-
-  if (!pendingChunk) {
-    // All chunks done, mark job as completed
-    job.status = 'completed';
-    job.updatedAt = Date.now();
-    await redisClient.set(`job:${job.id}`, JSON.stringify(job));
-
-    // Cache the completed job
-    const cacheKey = `dub:${job.youtubeUrl}:${job.targetLang}`;
-    await redisClient.set(cacheKey, JSON.stringify(job), { EX: 86400 * 7 });
-    return;
+// Request chunks for current timestamp - processes current and next chunk in parallel
+export const requestChunksForTimestamp = async (
+  sessionId: string,
+  currentTime: number
+): Promise<{ current: ChunkResult; next: ChunkResult | null }> => {
+  const session = sessions.get(sessionId);
+  if (!session) {
+    throw new Error('Session not found');
   }
 
-  try {
-    // Update chunk status to processing
-    pendingChunk.status = 'processing';
-    job.status = 'processing';
-    job.currentChunk = pendingChunk.index;
-    job.updatedAt = Date.now();
-    await redisClient.set(`job:${job.id}`, JSON.stringify(job));
+  const currentChunkIndex = Math.floor(currentTime / CHUNK_DURATION);
+  const nextChunkIndex = currentChunkIndex + 1;
 
-    // Call ElevenLabs dubbing API with time range
-    const response = await client.dubbing.dubAVideoOrAnAudioFile({
-      sourceUrl: job.youtubeUrl,
-      sourceLang: job.sourceLang,
-      targetLang: job.targetLang,
-      numSpeakers: 0,
-      watermark: false,
-      highestResolution: false,
-      startTime: pendingChunk.startTime,
-      endTime: pendingChunk.endTime,
-    });
+  // Process current and next chunk in parallel
+  const [currentChunk, nextChunk] = await Promise.all([
+    processChunk(session, currentChunkIndex),
+    processChunk(session, nextChunkIndex),
+  ]);
 
-    pendingChunk.dubbingId = response.dubbingId;
-    job.updatedAt = Date.now();
-    await redisClient.set(`job:${job.id}`, JSON.stringify(job));
-
-    // Poll for completion
-    await pollChunkCompletion(job, pendingChunk);
-
-    // Process next chunk
-    await processNextChunk(job);
-
-  } catch (error) {
-    pendingChunk.status = 'failed';
-    pendingChunk.error = error instanceof Error ? error.message : 'Unknown error';
-    job.status = 'failed';
-    job.error = pendingChunk.error;
-    job.updatedAt = Date.now();
-    await redisClient.set(`job:${job.id}`, JSON.stringify(job));
-    throw error;
-  }
+  return {
+    current: currentChunk,
+    next: nextChunk,
+  };
 };
 
-// Poll ElevenLabs API for chunk completion
-const pollChunkCompletion = async (job: DubbingJob, chunk: ChunkInfo): Promise<void> => {
-  const maxAttempts = 60; // 5 minutes max for a 30s chunk
+// Process a single chunk
+const processChunk = async (session: SessionState, chunkIndex: number): Promise<ChunkResult> => {
+  const startTime = chunkIndex * CHUNK_DURATION;
+  const endTime = startTime + CHUNK_DURATION;
 
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    if (!chunk.dubbingId) throw new Error('No dubbing ID for chunk');
-
-    const status = await client.dubbing.getDubbingProjectMetadata(chunk.dubbingId);
-
-    if (status.status === 'dubbed') {
-      chunk.status = 'completed';
-      chunk.audioUrl = `/api/dubbing/audio/${chunk.dubbingId}/${job.targetLang}`;
-      job.updatedAt = Date.now();
-      await redisClient.set(`job:${job.id}`, JSON.stringify(job));
-      return;
-    }
-
-    if (status.status === 'failed') {
-      throw new Error(`Chunk dubbing failed: ${status.error || 'Unknown error'}`);
-    }
-
-    // Wait 5 seconds before next poll
-    await new Promise(resolve => setTimeout(resolve, 5000));
+  // Check if chunk already exists
+  const existingChunk = session.chunks.get(chunkIndex);
+  if (existingChunk && (existingChunk.status === 'completed' || existingChunk.status === 'processing')) {
+    return existingChunk;
   }
 
-  throw new Error('Chunk dubbing timed out');
-};
-
-// Request a specific chunk to be processed (for on-demand loading)
-export const requestChunk = async (jobId: string, chunkIndex: number): Promise<ChunkInfo | null> => {
-  const jobData = await redisClient.get(`job:${jobId}`);
-  if (!jobData) return null;
-
-  const job: DubbingJob = JSON.parse(jobData);
-
-  if (chunkIndex >= job.chunks.length) return null;
-
-  const chunk = job.chunks[chunkIndex];
-
-  // If chunk is already completed or processing, return it
-  if (chunk.status === 'completed' || chunk.status === 'processing') {
-    return chunk;
+  // Check cache
+  const cacheKey = `chunk:${session.youtubeUrl}:${session.targetLang}:${chunkIndex}`;
+  const cached = await redisClient.get(cacheKey);
+  if (cached) {
+    const cachedChunk = JSON.parse(cached) as ChunkResult;
+    session.chunks.set(chunkIndex, cachedChunk);
+    return cachedChunk;
   }
 
-  // If chunk is pending and we're not already processing it, start processing
-  if (chunk.status === 'pending') {
-    // Mark all earlier chunks as pending priority
-    processChunkPriority(job, chunkIndex).catch(console.error);
+  // Check if already processing
+  if (session.processingChunks.has(chunkIndex)) {
+    return {
+      chunkIndex,
+      startTime,
+      endTime,
+      status: 'processing',
+    };
   }
+
+  // Start processing
+  session.processingChunks.add(chunkIndex);
+
+  const chunk: ChunkResult = {
+    chunkIndex,
+    startTime,
+    endTime,
+    status: 'processing',
+  };
+  session.chunks.set(chunkIndex, chunk);
+
+  // Process asynchronously
+  processChunkAsync(session, chunk, cacheKey).catch(console.error);
 
   return chunk;
 };
 
-// Process a specific chunk with priority
-const processChunkPriority = async (job: DubbingJob, targetIndex: number): Promise<void> => {
-  const chunk = job.chunks[targetIndex];
-  if (chunk.status !== 'pending') return;
-
+// Async chunk processing
+const processChunkAsync = async (
+  session: SessionState,
+  chunk: ChunkResult,
+  cacheKey: string
+): Promise<void> => {
   try {
-    chunk.status = 'processing';
-    job.currentChunk = targetIndex;
-    job.updatedAt = Date.now();
-    await redisClient.set(`job:${job.id}`, JSON.stringify(job));
-
+    // Call ElevenLabs dubbing API with time range
     const response = await client.dubbing.dubAVideoOrAnAudioFile({
-      sourceUrl: job.youtubeUrl,
-      sourceLang: job.sourceLang,
-      targetLang: job.targetLang,
+      sourceUrl: session.youtubeUrl,
+      sourceLang: 'auto',
+      targetLang: session.targetLang,
       numSpeakers: 0,
       watermark: false,
       highestResolution: false,
@@ -239,40 +161,74 @@ const processChunkPriority = async (job: DubbingJob, targetIndex: number): Promi
     });
 
     chunk.dubbingId = response.dubbingId;
-    await redisClient.set(`job:${job.id}`, JSON.stringify(job));
 
-    await pollChunkCompletion(job, chunk);
+    // Poll for completion
+    await pollForChunkCompletion(chunk, session.targetLang);
+
+    chunk.status = 'completed';
+    chunk.audioUrl = `/api/stream/audio/${chunk.dubbingId}/${session.targetLang}`;
+
+    // Cache the result
+    await redisClient.set(cacheKey, JSON.stringify(chunk), { EX: 86400 }); // 24 hour cache
 
   } catch (error) {
     chunk.status = 'failed';
     chunk.error = error instanceof Error ? error.message : 'Unknown error';
-    await redisClient.set(`job:${job.id}`, JSON.stringify(job));
+  } finally {
+    session.processingChunks.delete(chunk.chunkIndex);
+    session.chunks.set(chunk.chunkIndex, chunk);
   }
 };
 
-// Get job status
-export const getJobStatus = async (jobId: string): Promise<DubbingJob | null> => {
-  const job = await redisClient.get(`job:${jobId}`);
-  return job ? JSON.parse(job) : null;
+// Poll for chunk completion
+const pollForChunkCompletion = async (chunk: ChunkResult, targetLang: string): Promise<void> => {
+  const maxAttempts = 60; // 5 minutes max for a 30s chunk
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (!chunk.dubbingId) throw new Error('No dubbing ID');
+
+    const status = await client.dubbing.getDubbingProjectMetadata(chunk.dubbingId);
+
+    if (status.status === 'dubbed') {
+      return;
+    }
+
+    if (status.status === 'failed') {
+      throw new Error(`Dubbing failed: ${status.error || 'Unknown error'}`);
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 5000));
+  }
+
+  throw new Error('Dubbing timed out');
 };
 
-// Get chunk status for a specific time
-export const getChunkForTime = async (jobId: string, currentTime: number): Promise<ChunkInfo | null> => {
-  const jobData = await redisClient.get(`job:${jobId}`);
-  if (!jobData) return null;
+// Get chunk status
+export const getChunkStatus = (sessionId: string, chunkIndex: number): ChunkResult | null => {
+  const session = sessions.get(sessionId);
+  if (!session) return null;
 
-  const job: DubbingJob = JSON.parse(jobData);
-  const chunkIndex = Math.floor(currentTime / CHUNK_DURATION);
-
-  if (chunkIndex >= job.chunks.length) return null;
-
-  return job.chunks[chunkIndex];
+  return session.chunks.get(chunkIndex) || null;
 };
 
-// Get dubbed audio stream
-export const getDubbedAudio = async (dubbingId: string, targetLang: string) => {
+// Get all chunks status for a session
+export const getSessionStatus = (sessionId: string): { chunks: ChunkResult[] } | null => {
+  const session = sessions.get(sessionId);
+  if (!session) return null;
+
+  return {
+    chunks: Array.from(session.chunks.values()).sort((a, b) => a.chunkIndex - b.chunkIndex),
+  };
+};
+
+// Stream dubbed audio
+export const getDubbedAudioStream = async (dubbingId: string, targetLang: string) => {
   return client.dubbing.getDubbedFile(dubbingId, targetLang);
 };
 
+// Cleanup session
+export const deleteSession = (sessionId: string): void => {
+  sessions.delete(sessionId);
+};
+
 export { CHUNK_DURATION };
-export type { DubbingJob, ChunkInfo };

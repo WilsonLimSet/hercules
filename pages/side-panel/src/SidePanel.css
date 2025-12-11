@@ -82,6 +82,27 @@
   cursor: pointer;
 }
 
+.hercules-info {
+  margin-top: 1rem;
+  padding: 0.75rem;
+  background: rgba(128, 128, 128, 0.1);
+  border-radius: 0.5rem;
+  font-size: 0.8rem;
+}
+
+.hercules-info p {
+  margin: 0 0 0.5rem;
+}
+
+.hercules-info ol {
+  margin: 0;
+  padding-left: 1.25rem;
+}
+
+.hercules-info li {
+  margin-bottom: 0.25rem;
+}
+
 .hercules-actions {
   margin-top: 1.5rem;
 }
