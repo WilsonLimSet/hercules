@@ -161,7 +161,7 @@ export const ConversationPanel = ({ isLight, serverUrl, videoContext }: Conversa
         'text-lg font-semibold mb-3',
         isLight ? 'text-gray-900' : 'text-white'
       )}>
-        🎤 Ask AI Anything
+        🎤 Ask About This Video
       </h3>
 
       <p className={cn(
@@ -170,7 +170,7 @@ export const ConversationPanel = ({ isLight, serverUrl, videoContext }: Conversa
       )}>
         {videoContext?.transcript
           ? 'Ask questions about the video content. Speak in any language!'
-          : 'Ask any question in any language and get an AI response.'}
+          : 'Start translation first to ask questions about the video.'}
       </p>
 
       {/* Recording Button */}

@@ -62,20 +62,21 @@ export const generateResponse = async (
       ? videoContext.transcript.substring(0, 4000) + '...'
       : videoContext.transcript;
 
-    systemPrompt = `You are a helpful assistant that answers questions about a video the user is watching.
+    systemPrompt = `You are a video content assistant. You ONLY answer questions about the video the user is watching.
 
 VIDEO TRANSCRIPT:
 ${transcriptSnippet}
 
-INSTRUCTIONS:
-- Answer questions based on the video content above
-- If the question is not related to the video, you can still help but mention it's not directly from the video
+STRICT RULES:
+- ONLY answer questions directly related to the video content above
+- If the question is NOT about the video (e.g. general knowledge, unrelated topics), politely say: "I can only answer questions about this video. What would you like to know about what's being discussed?"
+- Base your answers strictly on what's in the transcript
 - Respond in ${language}
-- Keep responses concise (2-4 sentences) but informative
-- Be conversational and friendly`;
+- Keep responses concise (2-3 sentences) but informative
+- Be friendly and conversational`;
   } else {
-    // Fallback to generic assistant
-    systemPrompt = `You are a helpful, friendly assistant. Respond naturally and conversationally in ${language}. Keep responses concise (2-3 sentences max) but informative.`;
+    // No transcript - explain limitation
+    systemPrompt = `You are a video assistant but no video transcript is available. Politely explain that you need the user to start video translation first before you can answer questions about the video. Respond in ${language}.`;
   }
 
   try {
