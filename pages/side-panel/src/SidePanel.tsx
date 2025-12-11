@@ -407,18 +407,6 @@ const SidePanel = () => {
               </label>
             </div>
 
-            <div className="hercules-info">
-              <p>
-                <strong>How it works:</strong>
-              </p>
-              <ol>
-                <li>Click "Start Translation"</li>
-                <li>Original audio will be lowered</li>
-                <li>Dubbed audio plays over the video</li>
-                <li>Each 30s chunk is processed</li>
-              </ol>
-            </div>
-
             <div className="hercules-actions">
               {!isActive ? (
                 <button
@@ -460,16 +448,6 @@ const SidePanel = () => {
               </div>
             )}
 
-            {debugLog.length > 0 && (
-              <div className="hercules-debug">
-                <strong>Debug:</strong>
-                {debugLog.map((log, i) => (
-                  <div key={i} className="hercules-debug-line">
-                    {log}
-                  </div>
-                ))}
-              </div>
-            )}
           </>
         )}
       </main>
