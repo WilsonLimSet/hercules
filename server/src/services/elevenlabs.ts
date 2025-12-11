@@ -5,7 +5,7 @@ const client = new ElevenLabsClient({
   apiKey: process.env.ELEVENLABS_API_KEY,
 });
 
-const CHUNK_DURATION = 30; // seconds
+const CHUNK_DURATION = 10; // seconds
 
 export const SUPPORTED_LANGUAGES = {
   en: 'English',
@@ -148,8 +148,9 @@ const processChunkAsync = async (
   cacheKey: string
 ): Promise<void> => {
   try {
+    console.log(`[ELEVENLABS] Starting dubbing for chunk ${chunk.chunkIndex} (${chunk.startTime}s - ${chunk.endTime}s)`);
     // Call ElevenLabs dubbing API with time range
-    const response = await client.dubbing.dubAVideoOrAnAudioFile({
+    const response = await client.dubbing.create({
       sourceUrl: session.youtubeUrl,
       sourceLang: 'auto',
       targetLang: session.targetLang,
@@ -161,17 +162,20 @@ const processChunkAsync = async (
     });
 
     chunk.dubbingId = response.dubbingId;
+    console.log(`[ELEVENLABS] Dubbing ID ${response.dubbingId} created for chunk ${chunk.chunkIndex}`);
 
     // Poll for completion
     await pollForChunkCompletion(chunk, session.targetLang);
 
     chunk.status = 'completed';
     chunk.audioUrl = `/api/stream/audio/${chunk.dubbingId}/${session.targetLang}`;
+    console.log(`[ELEVENLABS] Chunk ${chunk.chunkIndex} completed! Audio URL: ${chunk.audioUrl}`);
 
     // Cache the result
     await redisClient.set(cacheKey, JSON.stringify(chunk), { EX: 86400 }); // 24 hour cache
 
   } catch (error) {
+    console.error(`[ELEVENLABS] Chunk ${chunk.chunkIndex} failed:`, error);
     chunk.status = 'failed';
     chunk.error = error instanceof Error ? error.message : 'Unknown error';
   } finally {
@@ -187,7 +191,7 @@ const pollForChunkCompletion = async (chunk: ChunkResult, targetLang: string): P
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (!chunk.dubbingId) throw new Error('No dubbing ID');
 
-    const status = await client.dubbing.getDubbingProjectMetadata(chunk.dubbingId);
+    const status = await client.dubbing.get(chunk.dubbingId);
 
     if (status.status === 'dubbed') {
       return;
@@ -223,7 +227,7 @@ export const getSessionStatus = (sessionId: string): { chunks: ChunkResult[] } |
 
 // Stream dubbed audio
 export const getDubbedAudioStream = async (dubbingId: string, targetLang: string) => {
-  return client.dubbing.getDubbedFile(dubbingId, targetLang);
+  return client.dubbing.audio.get(dubbingId, targetLang);
 };
 
 // Cleanup session

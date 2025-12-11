@@ -1,18 +1,19 @@
 // Hercules YouTube Content Script
-// Real-time video translation with audio overlay
+// Real-time video translation with TTS
 
 console.log('[Hercules] YouTube content script loaded');
 
-const CHUNK_DURATION = 30;
-const POLL_INTERVAL = 2000; // Poll for chunk status every 2 seconds
-
-interface ChunkResult {
-  chunkIndex: number;
+interface Segment {
+  index: number;
+  text?: string;
   startTime: number;
   endTime: number;
-  status: 'pending' | 'processing' | 'completed' | 'failed';
+}
+
+interface SegmentResponse {
+  segment: Segment | null;
+  status: 'ready' | 'translating' | 'generating_audio' | 'no_segment';
   audioUrl?: string;
-  error?: string;
 }
 
 interface SessionConfig {
@@ -25,105 +26,91 @@ interface SessionConfig {
 let session: SessionConfig | null = null;
 let videoElement: HTMLVideoElement | null = null;
 let currentAudio: HTMLAudioElement | null = null;
-let nextAudio: HTMLAudioElement | null = null;
-let currentChunkIndex = -1;
+let currentSegmentIndex = -1;
 let isActive = false;
 let pollInterval: ReturnType<typeof setInterval> | null = null;
-let muteOverlay: HTMLDivElement | null = null;
+let overlay: HTMLDivElement | null = null;
+let isAudioPlaying = false;
+let lastPlayedSegmentIndex = -1;
 
 // Find YouTube video element
 const getVideoElement = (): HTMLVideoElement | null => {
   return document.querySelector('video.html5-main-video') as HTMLVideoElement | null;
 };
 
-// Create audio element
-const createAudio = (url: string, volume: number): HTMLAudioElement => {
-  const audio = new Audio(url);
-  audio.volume = volume / 100;
-  audio.crossOrigin = 'anonymous';
-  return audio;
-};
-
-// Get chunk index for a timestamp
-const getChunkIndex = (time: number): number => Math.floor(time / CHUNK_DURATION);
-
-// Request chunks from server (current + next in parallel)
-const requestChunks = async (currentTime: number): Promise<{ current: ChunkResult; next: ChunkResult | null }> => {
+// Request segment for current time
+const requestSegment = async (currentTime: number): Promise<SegmentResponse> => {
   if (!session) throw new Error('No active session');
 
-  const response = await fetch(`${session.serverUrl}/api/dubbing/session/${session.sessionId}/chunks`, {
+  const response = await fetch(`${session.serverUrl}/api/tts/session/${session.sessionId}/segment`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ currentTime }),
   });
 
-  if (!response.ok) throw new Error('Failed to request chunks');
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+    if (error.error === 'Session not found' || response.status === 404) {
+      console.error('[Hercules] Session expired');
+      stopTranslation();
+      chrome.runtime.sendMessage({ type: 'HERCULES_SESSION_EXPIRED' });
+      throw new Error('Session expired');
+    }
+    throw new Error(error.error || 'Failed to request segment');
+  }
   return response.json();
 };
 
-// Get chunk status
-const getChunkStatus = async (chunkIndex: number): Promise<ChunkResult | null> => {
-  if (!session) return null;
+// Send status update
+const sendStatus = (status: string): void => {
+  updateOverlayStatus(status);
+  chrome.runtime.sendMessage({ type: 'HERCULES_STATUS_UPDATE', status }).catch(() => {});
+};
 
+// Play audio for a segment
+const playSegmentAudio = async (audioUrl: string, segment: Segment): Promise<void> => {
+  if (!session || !videoElement) return;
+
+  // Don't interrupt if audio is still playing (unless it's a seek/skip)
+  if (isAudioPlaying && currentAudio && !currentAudio.paused) {
+    // Only interrupt if we've skipped more than 2 segments (user seeked)
+    if (Math.abs(segment.index - lastPlayedSegmentIndex) <= 2) {
+      console.log(`[Hercules] Audio still playing, queuing segment ${segment.index}`);
+      return;
+    }
+  }
+
+  // Stop current audio
+  if (currentAudio) {
+    currentAudio.pause();
+    currentAudio.src = '';
+  }
+
+  currentAudio = new Audio(`${session.serverUrl}${audioUrl}`);
+  currentAudio.volume = session.volume / 100;
+
+  currentSegmentIndex = segment.index;
+  lastPlayedSegmentIndex = segment.index;
+  isAudioPlaying = true;
+
+  // Track when audio finishes
+  currentAudio.onended = () => {
+    isAudioPlaying = false;
+    console.log(`[Hercules] Segment ${segment.index} audio finished`);
+  };
+
+  currentAudio.onerror = () => {
+    isAudioPlaying = false;
+  };
+
+  // Always try to play - user interaction already happened via Start button
   try {
-    const response = await fetch(
-      `${session.serverUrl}/api/dubbing/session/${session.sessionId}/chunk/${chunkIndex}`
-    );
-    if (!response.ok) return null;
-    return response.json();
-  } catch {
-    return null;
+    await currentAudio.play();
+    console.log(`[Hercules] Playing segment ${segment.index}: "${segment.text?.substring(0, 30)}..."`);
+  } catch (error) {
+    isAudioPlaying = false;
+    console.error('[Hercules] Failed to play audio:', error);
   }
-};
-
-// Preload next chunk audio
-const preloadNextChunk = async (chunkIndex: number): Promise<void> => {
-  const chunk = await getChunkStatus(chunkIndex);
-  if (chunk?.status === 'completed' && chunk.audioUrl && session) {
-    nextAudio = createAudio(`${session.serverUrl}${chunk.audioUrl}`, session.volume);
-    nextAudio.preload = 'auto';
-    console.log(`[Hercules] Preloaded chunk ${chunkIndex}`);
-  }
-};
-
-// Switch to next chunk audio
-const switchToChunk = async (chunk: ChunkResult): Promise<void> => {
-  if (!session || !videoElement || !chunk.audioUrl) return;
-
-  // Use preloaded audio if available
-  if (nextAudio && currentChunkIndex + 1 === chunk.chunkIndex) {
-    if (currentAudio) {
-      currentAudio.pause();
-      currentAudio.src = '';
-    }
-    currentAudio = nextAudio;
-    nextAudio = null;
-  } else {
-    if (currentAudio) {
-      currentAudio.pause();
-      currentAudio.src = '';
-    }
-    currentAudio = createAudio(`${session.serverUrl}${chunk.audioUrl}`, session.volume);
-  }
-
-  currentChunkIndex = chunk.chunkIndex;
-
-  // Sync position within chunk
-  const offsetInChunk = videoElement.currentTime - chunk.startTime;
-  currentAudio.currentTime = Math.max(0, Math.min(offsetInChunk, CHUNK_DURATION));
-  currentAudio.playbackRate = videoElement.playbackRate;
-
-  // Play if video is playing
-  if (!videoElement.paused) {
-    try {
-      await currentAudio.play();
-    } catch (error) {
-      console.error('[Hercules] Failed to play audio:', error);
-    }
-  }
-
-  // Preload next chunk
-  preloadNextChunk(chunk.chunkIndex + 1);
 };
 
 // Main update loop
@@ -131,46 +118,45 @@ const updatePlayback = async (): Promise<void> => {
   if (!session || !videoElement || !isActive) return;
 
   const currentTime = videoElement.currentTime;
-  const neededChunkIndex = getChunkIndex(currentTime);
 
-  // Need different chunk?
-  if (neededChunkIndex !== currentChunkIndex) {
-    console.log(`[Hercules] Need chunk ${neededChunkIndex}, have ${currentChunkIndex}`);
+  try {
+    const response = await requestSegment(currentTime);
 
-    // Request chunks (current + next in parallel)
-    try {
-      const { current } = await requestChunks(currentTime);
-
-      if (current.status === 'completed' && current.audioUrl) {
-        await switchToChunk(current);
-      } else {
-        console.log(`[Hercules] Chunk ${neededChunkIndex} status: ${current.status}`);
-        // Keep polling until ready
+    if (response.status === 'no_segment') {
+      // No speech at this time
+      if (currentAudio && !currentAudio.paused) {
+        // Let current audio finish
       }
-    } catch (error) {
-      console.error('[Hercules] Failed to request chunks:', error);
+      return;
     }
-  }
 
-  // Sync audio time
-  if (currentAudio && !videoElement.paused) {
-    const chunkStartTime = currentChunkIndex * CHUNK_DURATION;
-    const expectedOffset = currentTime - chunkStartTime;
-    const drift = Math.abs(currentAudio.currentTime - expectedOffset);
+    if (!response.segment) return;
 
-    if (drift > 0.5) {
-      currentAudio.currentTime = Math.max(0, expectedOffset);
+    // Only act if this is a different segment
+    if (response.segment.index === currentSegmentIndex) {
+      return;
     }
+
+    if (response.status === 'ready' && response.audioUrl) {
+      sendStatus(`Playing: "${response.segment.text?.substring(0, 25)}..."`);
+      await playSegmentAudio(response.audioUrl, response.segment);
+    } else if (response.status === 'generating_audio') {
+      sendStatus(`Generating audio for segment ${response.segment.index}...`);
+    } else if (response.status === 'translating') {
+      sendStatus(`Translating segment ${response.segment.index}...`);
+    }
+  } catch (error) {
+    console.error('[Hercules] Update error:', error);
   }
 };
 
-// Create mute overlay UI
-const createMuteOverlay = (): void => {
-  if (muteOverlay) return;
+// Create overlay UI
+const createOverlay = (): void => {
+  if (overlay) return;
 
-  muteOverlay = document.createElement('div');
-  muteOverlay.id = 'hercules-overlay';
-  muteOverlay.innerHTML = `
+  overlay = document.createElement('div');
+  overlay.id = 'hercules-overlay';
+  overlay.innerHTML = `
     <style>
       #hercules-overlay {
         position: fixed;
@@ -187,48 +173,25 @@ const createMuteOverlay = (): void => {
         display: flex;
         align-items: center;
         gap: 12px;
-        cursor: pointer;
-        transition: transform 0.2s, box-shadow 0.2s;
+        max-width: 350px;
       }
-      #hercules-overlay:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 6px 24px rgba(0,0,0,0.4);
-      }
-      #hercules-overlay .hercules-icon {
-        font-size: 24px;
-      }
-      #hercules-overlay .hercules-text {
-        display: flex;
-        flex-direction: column;
-        gap: 2px;
-      }
-      #hercules-overlay .hercules-title {
-        font-weight: 600;
-      }
-      #hercules-overlay .hercules-subtitle {
-        font-size: 12px;
-        opacity: 0.9;
-      }
-      #hercules-overlay .hercules-close {
-        margin-left: 8px;
-        opacity: 0.7;
-        font-size: 18px;
-      }
-      #hercules-overlay .hercules-close:hover {
-        opacity: 1;
-      }
+      #hercules-overlay .hercules-icon { font-size: 24px; }
+      #hercules-overlay .hercules-text { display: flex; flex-direction: column; gap: 2px; flex: 1; }
+      #hercules-overlay .hercules-title { font-weight: 600; }
+      #hercules-overlay .hercules-subtitle { font-size: 11px; opacity: 0.9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 250px; }
+      #hercules-overlay .hercules-close { opacity: 0.7; font-size: 18px; cursor: pointer; }
+      #hercules-overlay .hercules-close:hover { opacity: 1; }
     </style>
     <span class="hercules-icon">🦁</span>
     <div class="hercules-text">
-      <span class="hercules-title">Hercules Active</span>
-      <span class="hercules-subtitle">Translating audio...</span>
+      <span class="hercules-title">Hercules TTS</span>
+      <span class="hercules-subtitle">Starting...</span>
     </div>
     <span class="hercules-close" id="hercules-close">✕</span>
   `;
 
-  document.body.appendChild(muteOverlay);
+  document.body.appendChild(overlay);
 
-  // Close button
   document.getElementById('hercules-close')?.addEventListener('click', e => {
     e.stopPropagation();
     stopTranslation();
@@ -237,13 +200,13 @@ const createMuteOverlay = (): void => {
 };
 
 const updateOverlayStatus = (status: string): void => {
-  const subtitle = muteOverlay?.querySelector('.hercules-subtitle');
+  const subtitle = overlay?.querySelector('.hercules-subtitle');
   if (subtitle) subtitle.textContent = status;
 };
 
 const removeOverlay = (): void => {
-  muteOverlay?.remove();
-  muteOverlay = null;
+  overlay?.remove();
+  overlay = null;
 };
 
 // Video event handlers
@@ -258,63 +221,61 @@ const handleVideoPause = (): void => {
 };
 
 const handleVideoSeeked = (): void => {
-  updatePlayback();
-};
-
-const handleRateChange = (): void => {
-  if (currentAudio && videoElement) {
-    currentAudio.playbackRate = videoElement.playbackRate;
+  currentSegmentIndex = -1;
+  lastPlayedSegmentIndex = -1;
+  isAudioPlaying = false;
+  if (currentAudio) {
+    currentAudio.pause();
+    currentAudio.src = '';
+    currentAudio = null;
   }
+  updatePlayback();
 };
 
 // Start translation
 const startTranslation = async (config: SessionConfig): Promise<void> => {
-  stopTranslation(); // Clean up any existing session
+  stopTranslation();
 
   videoElement = getVideoElement();
   if (!videoElement) {
     console.error('[Hercules] No video element found');
+    sendStatus('Error: No video element found');
     return;
   }
 
   session = config;
   isActive = true;
 
-  // Mute original video
-  videoElement.volume = 0.1;
+  // Lower original video volume
+  videoElement.volume = 0.15;
 
   // Add event listeners
   videoElement.addEventListener('play', handleVideoPlay);
   videoElement.addEventListener('pause', handleVideoPause);
   videoElement.addEventListener('seeked', handleVideoSeeked);
-  videoElement.addEventListener('ratechange', handleRateChange);
 
   // Create overlay
-  createMuteOverlay();
-  updateOverlayStatus('Starting translation...');
+  createOverlay();
+  sendStatus('Ready - translating as you watch');
 
-  // Start update loop
-  pollInterval = setInterval(updatePlayback, POLL_INTERVAL);
+  // Poll every 500ms for responsive playback
+  pollInterval = setInterval(updatePlayback, 500);
 
   // Initial request
   await updatePlayback();
 
-  console.log('[Hercules] Translation started');
+  console.log('[Hercules] TTS Translation started');
 };
 
 // Stop translation
 const stopTranslation = (): void => {
   isActive = false;
+  isAudioPlaying = false;
 
   if (currentAudio) {
     currentAudio.pause();
     currentAudio.src = '';
     currentAudio = null;
-  }
-
-  if (nextAudio) {
-    nextAudio.src = '';
-    nextAudio = null;
   }
 
   if (pollInterval) {
@@ -327,13 +288,13 @@ const stopTranslation = (): void => {
     videoElement.removeEventListener('play', handleVideoPlay);
     videoElement.removeEventListener('pause', handleVideoPause);
     videoElement.removeEventListener('seeked', handleVideoSeeked);
-    videoElement.removeEventListener('ratechange', handleRateChange);
     videoElement = null;
   }
 
   removeOverlay();
   session = null;
-  currentChunkIndex = -1;
+  currentSegmentIndex = -1;
+  lastPlayedSegmentIndex = -1;
 
   console.log('[Hercules] Translation stopped');
 };
@@ -342,7 +303,18 @@ const stopTranslation = (): void => {
 const updateVolume = (volume: number): void => {
   if (session) session.volume = volume;
   if (currentAudio) currentAudio.volume = volume / 100;
-  if (nextAudio) nextAudio.volume = volume / 100;
+};
+
+// Start synced playback - seeks to start and plays video
+const startSyncedPlayback = (): void => {
+  if (!videoElement) return;
+
+  currentSegmentIndex = -1;
+  videoElement.currentTime = 0;
+  videoElement.play().catch(console.error);
+
+  console.log('[Hercules] Starting synced playback from beginning');
+  sendStatus('Playing synced from start');
 };
 
 // Message listener
@@ -373,13 +345,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     case 'HERCULES_GET_STATUS':
       sendResponse({
         isActive,
-        currentChunkIndex,
+        currentSegmentIndex,
         currentTime: videoElement?.currentTime || 0,
       });
       break;
 
-    case 'HERCULES_UPDATE_STATUS':
-      updateOverlayStatus(message.status);
+    case 'HERCULES_PLAY_SYNCED':
+      startSyncedPlayback();
       sendResponse({ success: true });
       break;
   }

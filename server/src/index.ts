@@ -1,10 +1,11 @@
+import dotenv from 'dotenv';
+dotenv.config();
+
 import express from 'express';
 import cors from 'cors';
 import { createClient } from 'redis';
-import dotenv from 'dotenv';
 import { dubbingRouter } from './routes/dubbing';
-
-dotenv.config();
+import { ttsRouter } from './routes/tts-translate';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -23,6 +24,7 @@ app.use(express.json());
 
 // Routes
 app.use('/api/dubbing', dubbingRouter);
+app.use('/api/tts', ttsRouter);
 
 // Health check
 app.get('/health', (req, res) => {

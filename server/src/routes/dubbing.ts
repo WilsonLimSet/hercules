@@ -27,6 +27,7 @@ dubbingRouter.get('/config', (_req: Request, res: Response) => {
 dubbingRouter.post('/session', (req: Request, res: Response) => {
   try {
     const { youtubeUrl, targetLang } = req.body;
+    console.log(`[SESSION] Creating session for ${youtubeUrl} -> ${targetLang}`);
 
     if (!youtubeUrl || !targetLang) {
       res.status(400).json({ error: 'Missing required fields: youtubeUrl, targetLang' });
@@ -53,6 +54,7 @@ dubbingRouter.post('/session/:sessionId/chunks', async (req: Request, res: Respo
   try {
     const { sessionId } = req.params;
     const { currentTime } = req.body;
+    console.log(`[CHUNKS] Session ${sessionId} requesting chunks at time ${currentTime}`);
 
     if (currentTime === undefined) {
       res.status(400).json({ error: 'Missing currentTime' });
@@ -60,6 +62,7 @@ dubbingRouter.post('/session/:sessionId/chunks', async (req: Request, res: Respo
     }
 
     const chunks = await requestChunksForTimestamp(sessionId, Number(currentTime));
+    console.log(`[CHUNKS] Returning chunks:`, JSON.stringify(chunks, null, 2));
     res.json(chunks);
   } catch (error) {
     console.error('Error requesting chunks:', error);

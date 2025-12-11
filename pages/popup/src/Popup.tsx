@@ -1,61 +1,58 @@
 import '@src/Popup.css';
-import { t } from '@extension/i18n';
-import { PROJECT_URL_OBJECT, useStorage, withErrorBoundary, withSuspense } from '@extension/shared';
+import { useStorage, withErrorBoundary, withSuspense } from '@extension/shared';
 import { exampleThemeStorage } from '@extension/storage';
-import { cn, ErrorDisplay, LoadingSpinner, ToggleButton } from '@extension/ui';
-
-const notificationOptions = {
-  type: 'basic',
-  iconUrl: chrome.runtime.getURL('icon-34.png'),
-  title: 'Injecting content script error',
-  message: 'You cannot inject script here!',
-} as const;
+import { cn, ErrorDisplay, LoadingSpinner } from '@extension/ui';
 
 const Popup = () => {
   const { isLight } = useStorage(exampleThemeStorage);
-  const logo = isLight ? 'popup/logo_vertical.svg' : 'popup/logo_vertical_dark.svg';
 
-  const goGithubSite = () => chrome.tabs.create(PROJECT_URL_OBJECT);
-
-  const injectContentScript = async () => {
+  const openSidePanel = async () => {
     const [tab] = await chrome.tabs.query({ currentWindow: true, active: true });
-
-    if (tab.url!.startsWith('about:') || tab.url!.startsWith('chrome:')) {
-      chrome.notifications.create('inject-error', notificationOptions);
+    if (tab.id) {
+      chrome.sidePanel.open({ tabId: tab.id });
     }
+  };
 
-    await chrome.scripting
-      .executeScript({
-        target: { tabId: tab.id! },
-        files: ['/content-runtime/example.iife.js', '/content-runtime/all.iife.js'],
-      })
-      .catch(err => {
-        // Handling errors related to other paths
-        if (err.message.includes('Cannot access a chrome:// URL')) {
-          chrome.notifications.create('inject-error', notificationOptions);
-        }
-      });
+  const goToYouTube = () => {
+    chrome.tabs.create({ url: 'https://youtube.com' });
   };
 
   return (
-    <div className={cn('App', isLight ? 'bg-slate-50' : 'bg-gray-800')}>
-      <header className={cn('App-header', isLight ? 'text-gray-900' : 'text-gray-100')}>
-        <button onClick={goGithubSite}>
-          <img src={chrome.runtime.getURL(logo)} className="App-logo" alt="logo" />
-        </button>
-        <p>
-          Edit <code>pages/popup/src/Popup.tsx</code>
-        </p>
-        <button
-          className={cn(
-            'mt-4 rounded px-4 py-1 font-bold shadow hover:scale-105',
-            isLight ? 'bg-blue-200 text-black' : 'bg-gray-700 text-white',
-          )}
-          onClick={injectContentScript}>
-          {t('injectButton')}
-        </button>
-        <ToggleButton>{t('toggleTheme')}</ToggleButton>
+    <div className={cn('hercules-popup', isLight ? 'bg-slate-50' : 'bg-gray-900')}>
+      <header className={cn('hercules-popup-header', isLight ? 'text-gray-900' : 'text-gray-100')}>
+        <div className="hercules-popup-logo">
+          <span className="hercules-popup-icon">🦁</span>
+          <h1>Hercules</h1>
+        </div>
+        <p className="hercules-popup-tagline">Real-time YouTube Translation</p>
       </header>
+
+      <main className={cn('hercules-popup-content', isLight ? 'text-gray-700' : 'text-gray-300')}>
+        <p>Translate any YouTube video to 20+ languages using AI dubbing.</p>
+
+        <div className="hercules-popup-actions">
+          <button
+            onClick={openSidePanel}
+            className={cn(
+              'hercules-popup-btn hercules-popup-btn-primary',
+            )}>
+            Open Side Panel
+          </button>
+
+          <button
+            onClick={goToYouTube}
+            className={cn(
+              'hercules-popup-btn',
+              isLight ? 'bg-gray-200 text-gray-800' : 'bg-gray-700 text-gray-200',
+            )}>
+            Go to YouTube
+          </button>
+        </div>
+      </main>
+
+      <footer className={cn('hercules-popup-footer', isLight ? 'text-gray-500' : 'text-gray-500')}>
+        <small>Powered by ElevenLabs</small>
+      </footer>
     </div>
   );
 };
