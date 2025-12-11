@@ -135,6 +135,71 @@
   color: #f5576c;
 }
 
+.hercules-progress {
+  margin-top: 1rem;
+  padding: 0.75rem;
+  background: rgba(128, 128, 128, 0.1);
+  border-radius: 0.5rem;
+}
+
+.hercules-progress-bar {
+  height: 8px;
+  background: rgba(128, 128, 128, 0.2);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.hercules-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #667eea, #764ba2);
+  border-radius: 4px;
+  transition: width 0.3s ease;
+}
+
+.hercules-progress-text {
+  margin-top: 0.5rem;
+  font-size: 0.75rem;
+  text-align: center;
+  opacity: 0.8;
+}
+
+.hercules-chunks {
+  display: flex;
+  gap: 3px;
+  margin-top: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.hercules-chunk {
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  background: rgba(128, 128, 128, 0.3);
+  transition: all 0.2s ease;
+}
+
+.hercules-chunk-completed {
+  background: #10b981;
+}
+
+.hercules-chunk-processing {
+  background: #667eea;
+  animation: pulse 1s infinite;
+}
+
+.hercules-chunk-failed {
+  background: #f5576c;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
 .hercules-footer {
   text-align: center;
   padding-top: 1rem;

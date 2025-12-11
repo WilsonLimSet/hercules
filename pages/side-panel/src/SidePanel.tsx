@@ -4,6 +4,8 @@ import { exampleThemeStorage, herculesStorage } from '@extension/storage';
 import { cn, ErrorDisplay, LoadingSpinner } from '@extension/ui';
 import { useState, useEffect } from 'react';
 
+const CHUNK_DURATION = 30;
+
 const SUPPORTED_LANGUAGES: Record<string, string> = {
   en: 'English',
   es: 'Spanish',
@@ -27,12 +29,31 @@ const SUPPORTED_LANGUAGES: Record<string, string> = {
   th: 'Thai',
 };
 
+interface ChunkInfo {
+  index: number;
+  startTime: number;
+  endTime: number;
+  status: 'pending' | 'processing' | 'completed' | 'failed';
+  audioUrl?: string;
+}
+
+interface JobWithChunks {
+  id: string;
+  chunks: ChunkInfo[];
+  currentChunk: number;
+  totalChunks: number;
+  status: 'pending' | 'processing' | 'completed' | 'failed';
+  error?: string;
+}
+
 const SidePanel = () => {
   const { isLight } = useStorage(exampleThemeStorage);
   const herculesState = useStorage(herculesStorage);
   const [currentUrl, setCurrentUrl] = useState<string>('');
   const [isYouTube, setIsYouTube] = useState(false);
   const [jobStatus, setJobStatus] = useState<string>('');
+  const [currentJob, setCurrentJob] = useState<JobWithChunks | null>(null);
+  const [isTranslating, setIsTranslating] = useState(false);
 
   useEffect(() => {
     // Get current tab URL
@@ -43,7 +64,7 @@ const SidePanel = () => {
     });
 
     // Listen for tab changes
-    const handleTabUpdate = (tabId: number, changeInfo: chrome.tabs.TabChangeInfo) => {
+    const handleTabUpdate = (_tabId: number, changeInfo: chrome.tabs.TabChangeInfo) => {
       if (changeInfo.url) {
         setCurrentUrl(changeInfo.url);
         setIsYouTube(changeInfo.url.includes('youtube.com/watch') || changeInfo.url.includes('youtu.be/'));
@@ -56,47 +77,99 @@ const SidePanel = () => {
 
   // Poll job status
   useEffect(() => {
-    if (!herculesState.currentJob || herculesState.currentJob.status === 'completed') return;
+    if (!currentJob || currentJob.status === 'completed' || currentJob.status === 'failed') return;
 
     const pollInterval = setInterval(async () => {
       try {
-        const response = await fetch(
-          `${herculesState.serverUrl}/api/dubbing/status/${herculesState.currentJob?.id}`,
-        );
-        const job = await response.json();
-        await herculesStorage.setCurrentJob(job);
+        const response = await fetch(`${herculesState.serverUrl}/api/dubbing/status/${currentJob.id}`);
+        const job: JobWithChunks = await response.json();
+        setCurrentJob(job);
 
-        if (job.status === 'completed') {
-          setJobStatus('Translation ready! Playing dubbed audio...');
-          // Notify content script to play audio
+        const completedChunks = job.chunks.filter(c => c.status === 'completed').length;
+        const processingChunk = job.chunks.find(c => c.status === 'processing');
+
+        if (completedChunks > 0) {
+          // Notify content script about available chunks
           chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
             if (tabs[0]?.id) {
               chrome.tabs.sendMessage(tabs[0].id, {
-                type: 'HERCULES_PLAY_DUBBED',
-                audioUrl: `${herculesState.serverUrl}${job.audioUrl}`,
-                volume: herculesState.volume,
+                type: 'HERCULES_UPDATE_CHUNKS',
+                chunks: job.chunks,
               });
             }
           });
-        } else if (job.status === 'failed') {
-          setJobStatus(`Translation failed: ${job.error}`);
+        }
+
+        if (processingChunk) {
+          setJobStatus(`Processing chunk ${processingChunk.index + 1}/${job.totalChunks}...`);
+        } else if (completedChunks === job.totalChunks) {
+          setJobStatus('All chunks ready!');
+          setIsTranslating(false);
         } else {
-          setJobStatus(`Translating... (${job.status})`);
+          setJobStatus(`${completedChunks}/${job.totalChunks} chunks ready`);
+        }
+
+        // Start playback as soon as first chunk is ready
+        if (completedChunks >= 1 && !isTranslating) {
+          const firstCompletedChunk = job.chunks.find(c => c.status === 'completed');
+          if (firstCompletedChunk) {
+            chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
+              if (tabs[0]?.id) {
+                chrome.tabs.sendMessage(tabs[0].id, {
+                  type: 'HERCULES_START_CHUNKS',
+                  jobId: job.id,
+                  chunks: job.chunks,
+                  serverUrl: herculesState.serverUrl,
+                  volume: herculesState.volume,
+                  targetLang: herculesState.targetLanguage,
+                });
+              }
+            });
+            setIsTranslating(true);
+          }
         }
       } catch (error) {
         console.error('Failed to poll job status:', error);
       }
-    }, 3000);
+    }, 2000);
 
     return () => clearInterval(pollInterval);
-  }, [herculesState.currentJob, herculesState.serverUrl, herculesState.volume]);
+  }, [currentJob, herculesState.serverUrl, herculesState.volume, herculesState.targetLanguage, isTranslating]);
+
+  const getVideoDuration = (): Promise<number> => {
+    return new Promise(resolve => {
+      chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
+        if (tabs[0]?.id) {
+          chrome.scripting.executeScript(
+            {
+              target: { tabId: tabs[0].id },
+              func: () => {
+                const video = document.querySelector('video.html5-main-video') as HTMLVideoElement;
+                return video?.duration || 0;
+              },
+            },
+            results => {
+              resolve(results?.[0]?.result || 300); // Default to 5 minutes if can't get duration
+            }
+          );
+        } else {
+          resolve(300);
+        }
+      });
+    });
+  };
 
   const handleTranslate = async () => {
     if (!isYouTube) return;
 
-    setJobStatus('Starting translation...');
+    setJobStatus('Getting video duration...');
 
     try {
+      const videoDuration = await getVideoDuration();
+      const totalChunks = Math.ceil(videoDuration / CHUNK_DURATION);
+
+      setJobStatus(`Starting translation (${totalChunks} chunks)...`);
+
       const response = await fetch(`${herculesState.serverUrl}/api/dubbing/create`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -104,27 +177,13 @@ const SidePanel = () => {
           youtubeUrl: currentUrl,
           sourceLang: 'auto',
           targetLang: herculesState.targetLanguage,
+          videoDuration,
         }),
       });
 
-      const job = await response.json();
-
-      if (job.status === 'completed') {
-        setJobStatus('Using cached translation!');
-        // Notify content script to play audio
-        chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
-          if (tabs[0]?.id) {
-            chrome.tabs.sendMessage(tabs[0].id, {
-              type: 'HERCULES_PLAY_DUBBED',
-              audioUrl: `${herculesState.serverUrl}${job.audioUrl}`,
-              volume: herculesState.volume,
-            });
-          }
-        });
-      } else {
-        await herculesStorage.setCurrentJob(job);
-        setJobStatus('Translation in progress...');
-      }
+      const job: JobWithChunks = await response.json();
+      setCurrentJob(job);
+      setJobStatus(`Processing chunk 1/${job.totalChunks}...`);
     } catch (error) {
       setJobStatus(`Error: ${error instanceof Error ? error.message : 'Connection failed'}`);
     }
@@ -136,9 +195,14 @@ const SidePanel = () => {
         chrome.tabs.sendMessage(tabs[0].id, { type: 'HERCULES_STOP' });
       }
     });
-    herculesStorage.setCurrentJob(null);
+    setCurrentJob(null);
+    setIsTranslating(false);
     setJobStatus('');
   };
+
+  const completedChunks = currentJob?.chunks.filter(c => c.status === 'completed').length || 0;
+  const totalChunks = currentJob?.totalChunks || 0;
+  const progress = totalChunks > 0 ? (completedChunks / totalChunks) * 100 : 0;
 
   return (
     <div className={cn('hercules-panel', isLight ? 'bg-slate-50' : 'bg-gray-900')}>
@@ -163,7 +227,12 @@ const SidePanel = () => {
                 <select
                   value={herculesState.targetLanguage}
                   onChange={e => herculesStorage.setTargetLanguage(e.target.value)}
-                  className={cn('hercules-select', isLight ? 'bg-white border-gray-300' : 'bg-gray-800 border-gray-600')}>
+                  disabled={!!currentJob}
+                  className={cn(
+                    'hercules-select',
+                    isLight ? 'bg-white border-gray-300' : 'bg-gray-800 border-gray-600',
+                    currentJob && 'opacity-50 cursor-not-allowed'
+                  )}>
                   {Object.entries(SUPPORTED_LANGUAGES).map(([code, name]) => (
                     <option key={code} value={code}>
                       {name}
@@ -179,16 +248,52 @@ const SidePanel = () => {
                   min="0"
                   max="100"
                   value={herculesState.volume}
-                  onChange={e => herculesStorage.setVolume(Number(e.target.value))}
+                  onChange={e => {
+                    herculesStorage.setVolume(Number(e.target.value));
+                    chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
+                      if (tabs[0]?.id) {
+                        chrome.tabs.sendMessage(tabs[0].id, {
+                          type: 'HERCULES_SET_VOLUME',
+                          volume: Number(e.target.value),
+                        });
+                      }
+                    });
+                  }}
                   className="hercules-slider"
                 />
               </label>
             </div>
 
+            {currentJob && (
+              <div className="hercules-progress">
+                <div className="hercules-progress-bar">
+                  <div
+                    className="hercules-progress-fill"
+                    style={{ width: `${progress}%` }}
+                  />
+                </div>
+                <div className="hercules-progress-text">
+                  {completedChunks}/{totalChunks} chunks ({Math.round(progress)}%)
+                </div>
+                <div className="hercules-chunks">
+                  {currentJob.chunks.map(chunk => (
+                    <div
+                      key={chunk.index}
+                      className={cn(
+                        'hercules-chunk',
+                        chunk.status === 'completed' && 'hercules-chunk-completed',
+                        chunk.status === 'processing' && 'hercules-chunk-processing',
+                        chunk.status === 'failed' && 'hercules-chunk-failed'
+                      )}
+                      title={`Chunk ${chunk.index + 1}: ${chunk.status}`}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div className="hercules-actions">
-              {!herculesState.currentJob ||
-              herculesState.currentJob.status === 'completed' ||
-              herculesState.currentJob.status === 'failed' ? (
+              {!currentJob ? (
                 <button onClick={handleTranslate} className="hercules-btn hercules-btn-primary">
                   🎬 Translate Video
                 </button>
@@ -203,7 +308,7 @@ const SidePanel = () => {
               <div
                 className={cn(
                   'hercules-status',
-                  herculesState.currentJob?.status === 'failed' ? 'hercules-status-error' : 'hercules-status-info',
+                  currentJob?.status === 'failed' ? 'hercules-status-error' : 'hercules-status-info'
                 )}>
                 {jobStatus}
               </div>
@@ -213,7 +318,7 @@ const SidePanel = () => {
       </main>
 
       <footer className={cn('hercules-footer', isLight ? 'text-gray-500' : 'text-gray-400')}>
-        <small>Powered by ElevenLabs</small>
+        <small>Powered by ElevenLabs • 30s chunks</small>
       </footer>
     </div>
   );
