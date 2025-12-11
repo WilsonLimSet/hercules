@@ -317,11 +317,15 @@ ttsRouter.get('/session/:sessionId', (req: Request, res: Response) => {
   const translatedCount = session.segments.filter(s => s.translatedText).length;
   const audioReadyCount = session.segments.filter(s => s.audioReady).length;
 
+  // Include transcript for Q&A feature (combine all original text)
+  const transcript = session.segments.map(s => s.originalText).join(' ');
+
   res.json({
     sessionId,
     totalSegments: session.segments.length,
     translatedSegments: translatedCount,
     audioReadySegments: audioReadyCount,
+    transcript,
   });
 });
 
