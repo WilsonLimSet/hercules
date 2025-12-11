@@ -1,5 +1,6 @@
 import { execSync } from 'child_process';
 import path from 'path';
+import { transcribeYouTubeVideo } from './stt';
 
 export interface TranscriptSegment {
   text: string;
@@ -29,6 +30,7 @@ export const extractVideoId = (url: string): string | null => {
 };
 
 // Fetch transcript using Python script (more reliable than npm package)
+// Falls back to ElevenLabs STT if YouTube captions unavailable
 export const fetchTranscript = async (videoUrl: string): Promise<TranscriptSegment[]> => {
   const videoId = extractVideoId(videoUrl);
   if (!videoId) {
@@ -37,6 +39,7 @@ export const fetchTranscript = async (videoUrl: string): Promise<TranscriptSegme
 
   console.log(`[TRANSCRIPT] Fetching transcript for video: ${videoId}`);
 
+  // Try YouTube captions first
   try {
     const scriptPath = path.join(__dirname, '../../scripts/get_transcript.py');
     const output = execSync(`python3 "${scriptPath}" "${videoId}"`, {
@@ -46,15 +49,38 @@ export const fetchTranscript = async (videoUrl: string): Promise<TranscriptSegme
 
     const result = JSON.parse(output);
 
-    if (!result.success) {
-      throw new Error(result.error || 'Failed to fetch transcript');
+    if (result.success && result.segments.length > 0) {
+      console.log(`[TRANSCRIPT] Got ${result.segments.length} segments from YouTube captions`);
+      return result.segments;
     }
 
-    console.log(`[TRANSCRIPT] Got ${result.segments.length} segments`);
-    return result.segments;
+    // No captions available, fall through to STT
+    console.log('[TRANSCRIPT] No YouTube captions, falling back to STT');
   } catch (error) {
-    console.error('[TRANSCRIPT] Failed to fetch:', error);
-    throw new Error('Failed to fetch transcript. Video may not have captions.');
+    console.log('[TRANSCRIPT] YouTube captions failed, falling back to STT:', error);
+  }
+
+  // Fallback: Use ElevenLabs Speech-to-Text
+  try {
+    console.log('[TRANSCRIPT] Using ElevenLabs STT to transcribe audio...');
+    const sttResult = await transcribeYouTubeVideo(videoUrl);
+
+    if (sttResult.segments.length === 0) {
+      throw new Error('STT returned no segments');
+    }
+
+    // Convert STT segments to our format
+    const segments: TranscriptSegment[] = sttResult.segments.map(seg => ({
+      text: seg.text,
+      offset: Math.round(seg.start * 1000), // Convert seconds to ms
+      duration: Math.round((seg.end - seg.start) * 1000),
+    }));
+
+    console.log(`[TRANSCRIPT] Got ${segments.length} segments from ElevenLabs STT`);
+    return segments;
+  } catch (sttError) {
+    console.error('[TRANSCRIPT] STT fallback also failed:', sttError);
+    throw new Error('Failed to get transcript. Neither YouTube captions nor STT available.');
   }
 };
 

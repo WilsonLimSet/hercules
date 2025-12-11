@@ -28,6 +28,48 @@ interface TTSSession {
 
 const sessions = new Map<string, TTSSession>();
 
+// Merge small transcript segments into larger sentence-based chunks
+const mergeIntoSentences = (rawSegments: TranscriptSegment[], targetDuration = 6): TranslatedSegment[] => {
+  const merged: TranslatedSegment[] = [];
+  let currentText = '';
+  let startTime = 0;
+  let endTime = 0;
+  let segmentIndex = 0;
+
+  for (let i = 0; i < rawSegments.length; i++) {
+    const seg = rawSegments[i];
+    const segStartTime = seg.offset / 1000;
+    const segEndTime = (seg.offset + seg.duration) / 1000;
+
+    if (currentText === '') {
+      startTime = segStartTime;
+    }
+
+    currentText += (currentText ? ' ' : '') + seg.text;
+    endTime = segEndTime;
+
+    // Check if we should create a new merged segment
+    const duration = endTime - startTime;
+    const endsWithPunctuation = /[.!?]$/.test(seg.text.trim());
+    const isLastSegment = i === rawSegments.length - 1;
+
+    // Create segment if: duration >= target OR ends with sentence punctuation OR is last
+    if (duration >= targetDuration || endsWithPunctuation || isLastSegment) {
+      merged.push({
+        index: segmentIndex++,
+        originalText: currentText.trim(),
+        translatedText: '',
+        startTime,
+        endTime,
+        audioReady: false,
+      });
+      currentText = '';
+    }
+  }
+
+  return merged;
+};
+
 // Create session - fetches and translates entire transcript upfront
 ttsRouter.post('/session', async (req: Request, res: Response) => {
   try {
@@ -43,7 +85,7 @@ ttsRouter.post('/session', async (req: Request, res: Response) => {
     let rawTranscript: TranscriptSegment[];
     try {
       rawTranscript = await fetchTranscript(youtubeUrl);
-      console.log(`[TTS-SESSION] Got ${rawTranscript.length} transcript segments`);
+      console.log(`[TTS-SESSION] Got ${rawTranscript.length} raw transcript segments`);
     } catch (error) {
       console.error('[TTS-SESSION] Failed to fetch transcript:', error);
       res.status(400).json({ error: 'Failed to fetch transcript. Video may not have captions.' });
@@ -52,15 +94,9 @@ ttsRouter.post('/session', async (req: Request, res: Response) => {
 
     const sessionId = `tts_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
-    // Convert and prepare segments (translate in background)
-    const segments: TranslatedSegment[] = rawTranscript.map((seg, index) => ({
-      index,
-      originalText: seg.text,
-      translatedText: '', // Will be filled by translation
-      startTime: seg.offset / 1000, // Convert ms to seconds
-      endTime: (seg.offset + seg.duration) / 1000,
-      audioReady: false,
-    }));
+    // Merge small segments into larger sentence-based chunks (~6 seconds each)
+    const segments = mergeIntoSentences(rawTranscript, 6);
+    console.log(`[TTS-SESSION] Merged into ${segments.length} sentence segments`);
 
     const session: TTSSession = {
       id: sessionId,
@@ -121,7 +157,7 @@ async function translateAllSegments(session: TTSSession) {
 ttsRouter.post('/session/:sessionId/segment', async (req: Request, res: Response) => {
   try {
     const { sessionId } = req.params;
-    const { currentTime } = req.body;
+    const { currentTime, segmentIndex } = req.body;
 
     const session = sessions.get(sessionId);
     if (!session) {
@@ -129,10 +165,15 @@ ttsRouter.post('/session/:sessionId/segment', async (req: Request, res: Response
       return;
     }
 
-    // Find segment that should be playing at currentTime
-    const segment = session.segments.find(
-      s => currentTime >= s.startTime && currentTime < s.endTime
-    );
+    // Find segment - either by index (for preloading) or by currentTime
+    let segment: TranslatedSegment | undefined;
+    if (typeof segmentIndex === 'number') {
+      segment = session.segments[segmentIndex];
+    } else {
+      segment = session.segments.find(
+        s => currentTime >= s.startTime && currentTime < s.endTime
+      );
+    }
 
     if (!segment) {
       // No segment at this time (silence in video)

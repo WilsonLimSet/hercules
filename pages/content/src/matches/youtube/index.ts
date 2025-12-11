@@ -30,8 +30,9 @@ let currentSegmentIndex = -1;
 let isActive = false;
 let pollInterval: ReturnType<typeof setInterval> | null = null;
 let overlay: HTMLDivElement | null = null;
-let isAudioPlaying = false;
-let lastPlayedSegmentIndex = -1;
+let playedSegments: Set<number> = new Set(); // Track segments we've already played
+let preloadedAudio: Map<number, HTMLAudioElement> = new Map(); // Preloaded audio by segment index
+let preloadingSegments: Set<number> = new Set(); // Segments currently being preloaded
 
 // Find YouTube video element
 const getVideoElement = (): HTMLVideoElement | null => {
@@ -67,48 +68,141 @@ const sendStatus = (status: string): void => {
   chrome.runtime.sendMessage({ type: 'HERCULES_STATUS_UPDATE', status }).catch(() => {});
 };
 
+// Send subtitle to side panel
+const sendSubtitle = (text: string): void => {
+  chrome.runtime.sendMessage({ type: 'HERCULES_SUBTITLE', subtitle: text }).catch(() => {});
+};
+
+// Preload audio for a segment
+const preloadSegmentAudio = async (segmentIndex: number): Promise<void> => {
+  if (!session || preloadedAudio.has(segmentIndex) || preloadingSegments.has(segmentIndex)) {
+    return;
+  }
+
+  preloadingSegments.add(segmentIndex);
+
+  try {
+    // Request segment info from server
+    const response = await fetch(`${session.serverUrl}/api/tts/session/${session.sessionId}/segment`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ segmentIndex }), // Request by index for preloading
+    });
+
+    if (!response.ok) return;
+
+    const data = await response.json();
+    if (data.status === 'ready' && data.audioUrl) {
+      const audio = new Audio(`${session.serverUrl}${data.audioUrl}`);
+      audio.volume = session.volume / 100;
+      audio.preload = 'auto';
+
+      // Wait for audio to be loaded
+      await new Promise<void>((resolve) => {
+        audio.oncanplaythrough = () => resolve();
+        audio.onerror = () => resolve();
+        audio.load();
+      });
+
+      preloadedAudio.set(segmentIndex, audio);
+      console.log(`[Hercules] Preloaded segment ${segmentIndex}`);
+    }
+  } catch (error) {
+    console.error(`[Hercules] Failed to preload segment ${segmentIndex}:`, error);
+  } finally {
+    preloadingSegments.delete(segmentIndex);
+  }
+};
+
 // Play audio for a segment
 const playSegmentAudio = async (audioUrl: string, segment: Segment): Promise<void> => {
   if (!session || !videoElement) return;
 
-  // Don't interrupt if audio is still playing (unless it's a seek/skip)
-  if (isAudioPlaying && currentAudio && !currentAudio.paused) {
-    // Only interrupt if we've skipped more than 2 segments (user seeked)
-    if (Math.abs(segment.index - lastPlayedSegmentIndex) <= 2) {
-      console.log(`[Hercules] Audio still playing, queuing segment ${segment.index}`);
-      return;
-    }
+  // Skip if we've already played this segment
+  if (playedSegments.has(segment.index)) {
+    return;
   }
 
-  // Stop current audio
+  // If audio is currently playing, preload this one for later
+  if (currentAudio && !currentAudio.paused && !currentAudio.ended) {
+    if (!preloadedAudio.has(segment.index) && !preloadingSegments.has(segment.index)) {
+      const audio = new Audio(`${session.serverUrl}${audioUrl}`);
+      audio.volume = session.volume / 100;
+      audio.preload = 'auto';
+      preloadedAudio.set(segment.index, audio);
+      console.log(`[Hercules] Queued segment ${segment.index} for preload`);
+    }
+    return;
+  }
+
+  // Stop current audio if any
   if (currentAudio) {
     currentAudio.pause();
     currentAudio.src = '';
   }
 
-  currentAudio = new Audio(`${session.serverUrl}${audioUrl}`);
-  currentAudio.volume = session.volume / 100;
+  // Use preloaded audio if available
+  if (preloadedAudio.has(segment.index)) {
+    currentAudio = preloadedAudio.get(segment.index)!;
+    preloadedAudio.delete(segment.index);
+    console.log(`[Hercules] Using preloaded audio for segment ${segment.index}`);
+  } else {
+    currentAudio = new Audio(`${session.serverUrl}${audioUrl}`);
+    currentAudio.volume = session.volume / 100;
+  }
 
   currentSegmentIndex = segment.index;
-  lastPlayedSegmentIndex = segment.index;
-  isAudioPlaying = true;
+  playedSegments.add(segment.index);
 
-  // Track when audio finishes
+  // Track when audio finishes - immediately try to play next preloaded segment
   currentAudio.onended = () => {
-    isAudioPlaying = false;
     console.log(`[Hercules] Segment ${segment.index} audio finished`);
+
+    // Try to play next preloaded segment immediately
+    const nextIndex = segment.index + 1;
+    if (preloadedAudio.has(nextIndex) && !playedSegments.has(nextIndex) && isActive) {
+      const nextAudio = preloadedAudio.get(nextIndex)!;
+      preloadedAudio.delete(nextIndex);
+
+      currentAudio = nextAudio;
+      currentSegmentIndex = nextIndex;
+      playedSegments.add(nextIndex);
+
+      currentAudio.onended = () => {
+        console.log(`[Hercules] Segment ${nextIndex} audio finished`);
+        sendSubtitle('');
+      };
+
+      currentAudio.play().catch(console.error);
+      console.log(`[Hercules] Auto-playing next segment ${nextIndex}`);
+
+      // Get the subtitle for next segment from server (async, don't wait)
+      requestSegment(videoElement?.currentTime || 0).then(resp => {
+        if (resp.segment?.text) sendSubtitle(resp.segment.text);
+      }).catch(() => {});
+    } else {
+      sendSubtitle('');
+    }
   };
 
   currentAudio.onerror = () => {
-    isAudioPlaying = false;
+    console.error(`[Hercules] Audio error for segment ${segment.index}`);
   };
 
-  // Always try to play - user interaction already happened via Start button
+  // Play the audio
   try {
     await currentAudio.play();
     console.log(`[Hercules] Playing segment ${segment.index}: "${segment.text?.substring(0, 30)}..."`);
+
+    // Send subtitle
+    if (segment.text) {
+      sendSubtitle(segment.text);
+    }
+
+    // Preload next 2 segments
+    preloadSegmentAudio(segment.index + 1);
+    preloadSegmentAudio(segment.index + 2);
   } catch (error) {
-    isAudioPlaying = false;
     console.error('[Hercules] Failed to play audio:', error);
   }
 };
@@ -222,8 +316,9 @@ const handleVideoPause = (): void => {
 
 const handleVideoSeeked = (): void => {
   currentSegmentIndex = -1;
-  lastPlayedSegmentIndex = -1;
-  isAudioPlaying = false;
+  playedSegments.clear(); // Clear on seek so segments can replay
+  preloadedAudio.clear();
+  preloadingSegments.clear();
   if (currentAudio) {
     currentAudio.pause();
     currentAudio.src = '';
@@ -258,8 +353,8 @@ const startTranslation = async (config: SessionConfig): Promise<void> => {
   createOverlay();
   sendStatus('Ready - translating as you watch');
 
-  // Poll every 500ms for responsive playback
-  pollInterval = setInterval(updatePlayback, 500);
+  // Poll every 300ms for responsive playback
+  pollInterval = setInterval(updatePlayback, 300);
 
   // Initial request
   await updatePlayback();
@@ -270,13 +365,19 @@ const startTranslation = async (config: SessionConfig): Promise<void> => {
 // Stop translation
 const stopTranslation = (): void => {
   isActive = false;
-  isAudioPlaying = false;
 
   if (currentAudio) {
     currentAudio.pause();
     currentAudio.src = '';
     currentAudio = null;
   }
+
+  // Clear all preloaded audio
+  preloadedAudio.forEach(audio => {
+    audio.src = '';
+  });
+  preloadedAudio.clear();
+  preloadingSegments.clear();
 
   if (pollInterval) {
     clearInterval(pollInterval);
@@ -292,9 +393,10 @@ const stopTranslation = (): void => {
   }
 
   removeOverlay();
+  sendSubtitle(''); // Clear subtitle
   session = null;
   currentSegmentIndex = -1;
-  lastPlayedSegmentIndex = -1;
+  playedSegments.clear();
 
   console.log('[Hercules] Translation stopped');
 };
@@ -309,7 +411,18 @@ const updateVolume = (volume: number): void => {
 const startSyncedPlayback = (): void => {
   if (!videoElement) return;
 
+  // Reset all playback state
   currentSegmentIndex = -1;
+  playedSegments.clear();
+  preloadedAudio.forEach(audio => { audio.src = ''; });
+  preloadedAudio.clear();
+  preloadingSegments.clear();
+  if (currentAudio) {
+    currentAudio.pause();
+    currentAudio.src = '';
+    currentAudio = null;
+  }
+
   videoElement.currentTime = 0;
   videoElement.play().catch(console.error);
 

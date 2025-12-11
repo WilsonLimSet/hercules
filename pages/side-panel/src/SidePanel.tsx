@@ -40,6 +40,7 @@ const SidePanel = () => {
   const [debugLog, setDebugLog] = useState<string[]>([]);
   const [audioReadyCount, setAudioReadyCount] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [currentSubtitle, setCurrentSubtitle] = useState<string>('');
 
   const addLog = (msg: string) => {
     console.log('[Hercules]', msg);
@@ -91,18 +92,22 @@ const SidePanel = () => {
     chrome.tabs.onActivated.addListener(handleTabActivated);
 
     // Listen for messages from content script
-    const handleMessage = (message: { type: string; status?: string }) => {
+    const handleMessage = (message: { type: string; status?: string; subtitle?: string }) => {
       if (message.type === 'HERCULES_STOPPED') {
         setIsActive(false);
         setSessionId(null);
         setStatus('');
         setDebugLog([]);
+        setCurrentSubtitle('');
       } else if (message.type === 'HERCULES_SESSION_EXPIRED') {
         setIsActive(false);
         setSessionId(null);
         setStatus('Session expired - server may have restarted. Click Start again.');
         setStatusType('error');
         addLog('Session expired - please restart');
+        setCurrentSubtitle('');
+      } else if (message.type === 'HERCULES_SUBTITLE' && message.subtitle) {
+        setCurrentSubtitle(message.subtitle);
       } else if (message.type === 'HERCULES_STATUS_UPDATE' && message.status) {
         setStatus(message.status);
         if (message.status.includes('Playing')) {
@@ -402,18 +407,6 @@ const SidePanel = () => {
               </label>
             </div>
 
-            <div className="hercules-info">
-              <p>
-                <strong>How it works:</strong>
-              </p>
-              <ol>
-                <li>Click "Start Translation"</li>
-                <li>Original audio will be lowered</li>
-                <li>Dubbed audio plays over the video</li>
-                <li>Each 30s chunk is processed</li>
-              </ol>
-            </div>
-
             <div className="hercules-actions">
               {!isActive ? (
                 <button
@@ -436,6 +429,13 @@ const SidePanel = () => {
               )}
             </div>
 
+            {currentSubtitle && isPlaying && (
+              <div className="hercules-subtitle-box">
+                <div className="hercules-subtitle-label">Now Playing:</div>
+                <div className="hercules-subtitle-text">{currentSubtitle}</div>
+              </div>
+            )}
+
             {status && (
               <div
                 className={cn(
@@ -448,16 +448,6 @@ const SidePanel = () => {
               </div>
             )}
 
-            {debugLog.length > 0 && (
-              <div className="hercules-debug">
-                <strong>Debug:</strong>
-                {debugLog.map((log, i) => (
-                  <div key={i} className="hercules-debug-line">
-                    {log}
-                  </div>
-                ))}
-              </div>
-            )}
           </>
         )}
       </main>
